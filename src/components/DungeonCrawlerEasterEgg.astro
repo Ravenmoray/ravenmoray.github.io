@@ -104,31 +104,34 @@
     outline: none;
   }
 
-  .dce-tile {
+  /* :global() below is required: these tiles are created dynamically via
+     document.createElement in the script, so they never receive Astro's
+     scoped data-astro-cid attribute and would otherwise never match. */
+  :global(.dce-tile) {
     display: flex;
     align-items: center;
     justify-content: center;
     background: var(--bg);
-    border: 1px solid var(--border);
+    border: 1px solid rgba(128, 128, 128, 0.4);
     font-size: 0.9rem;
     color: var(--text-muted);
     border-radius: 2px;
   }
 
-  .dce-tile.dce-wall {
-    background: var(--border);
+  :global(.dce-tile.dce-wall) {
+    background: rgba(128, 128, 128, 0.35);
   }
 
-  .dce-tile.dce-player {
+  :global(.dce-tile.dce-player) {
     color: var(--accent);
     font-weight: 700;
   }
 
-  .dce-tile.dce-monster {
+  :global(.dce-tile.dce-monster) {
     color: #e08a8a;
   }
 
-  .dce-tile.dce-treasure {
+  :global(.dce-tile.dce-treasure) {
     color: var(--accent-strong);
   }
 
@@ -143,6 +146,10 @@
     display: flex;
     gap: 0.5rem;
     margin-top: 0.5rem;
+  }
+
+  .dce-choices[hidden] {
+    display: none;
   }
 
   .dce-btn {
