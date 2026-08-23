@@ -1,5 +1,7 @@
 ---
 import { ClientRouter } from 'astro:transitions';
+import CanvasBackground from '../components/CanvasBackground.astro';
+import ThemeToggle from '../components/ThemeToggle.astro';
 import '../styles/global.css';
 
 interface Props {
@@ -26,9 +28,24 @@ const navLinks = [
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="description" content={description} />
     <title>{title}</title>
+    {/* Blocking theme-init, duplicated from ThemeToggle.astro so it runs
+        pre-paint regardless of where the <ThemeToggle /> button sits in
+        the body. Safe to run twice — it's idempotent. */}
+    <script is:inline>
+      (function () {
+        try {
+          var stored = localStorage.getItem('theme');
+          var theme = stored === 'light' || stored === 'dark' ? stored : 'dark';
+          document.documentElement.dataset.theme = theme;
+        } catch (e) {
+          document.documentElement.dataset.theme = 'dark';
+        }
+      })();
+    </script>
     <ClientRouter />
   </head>
   <body>
+    <CanvasBackground />
     <header class="site-header">
       <div class="wrap">
         <a class="site-title" href="/">Karl Murray</a>
@@ -42,6 +59,7 @@ const navLinks = [
               {link.label}
             </a>
           ))}
+          <ThemeToggle />
         </nav>
       </div>
     </header>
