@@ -4,13 +4,19 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
 <BaseLayout title="Play — Karl Murray" description="A small flappy-style arcade game.">
   <h1>Play</h1>
-  <p class="intro-lead">Tap, click, or press Space to flap. Dodge the pipes, rack up a score.</p>
+  <p class="intro-lead">
+    Tap, click, or press Space to flap. Dodge the pipes, grab power-ups, and climb the
+    leaderboard.
+  </p>
 
   <div class="game-wrap">
     <canvas id="game" width="400" height="500" aria-label="Flappy arcade game canvas" role="img"></canvas>
   </div>
 
-  <p class="hint">Click / tap the canvas or press Space to flap. Same to start and restart.</p>
+  <p class="hint">
+    Click / tap the canvas or press Space to flap. Same to start and restart. When you enter a
+    top-5 score, type your initials and press Enter (or tap the canvas) to confirm.
+  </p>
 </BaseLayout>
 
 <style>
@@ -76,20 +82,38 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       border: styles.getPropertyValue('--border').trim() || '#262b34',
     };
 
-    // Tuned constants.
+    // ---- Tuned constants ----
     const GRAVITY = 0.45;
     const FLAP_VELOCITY = -8;
     const PIPE_WIDTH = 56;
-    const PIPE_GAP = 150;
-    const PIPE_SPEED = 2.4;
+    const BASE_GAP = 150;
+    const MIN_GAP = 100; // floor so it never becomes unfair
+    const BASE_SPEED = 2.4;
+    const MAX_SPEED = 3.9; // cap so it never becomes impossible
     const PIPE_INTERVAL = 105; // frames between new pipes
     const BIRD_RADIUS = 12;
     const BIRD_X = 90;
     const GROUND_HEIGHT = 4; // just the bottom boundary line
+    const POWERUP_RADIUS = 11;
+    const SHIELD_GRACE_FRAMES = 30; // brief invulnerability after a shield save
+    const SLOWMO_FRAMES = 240; // ~4s at 60fps
+    const DOUBLE_FRAMES = 300; // ~5s at 60fps
 
-    type Pipe = { x: number; gapY: number; passed: boolean };
-
-    type State = 'start' | 'playing' | 'gameover';
+    type PowerupType = 'shield' | 'slowmo' | 'double';
+    type Pipe = {
+      x: number;
+      gapY: number;
+      baseGapY: number;
+      gap: number;
+      passed: boolean;
+      type: 'static' | 'oscillate';
+      oscAmp: number;
+      oscSpeed: number;
+      oscPhase: number;
+    };
+    type PowerupEntity = { x: number; y: number; type: PowerupType };
+    type LeaderboardEntry = { initials: string; score: number };
+    type State = 'start' | 'playing' | 'gameover' | 'enterInitials';
 
     let state: State = 'start';
     let birdY = H / 2;
@@ -97,11 +121,89 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     let pipes: Pipe[] = [];
     let frame = 0;
     let score = 0;
-    let bestScore = 0;
+
+    // Power-up / effect state.
+    let powerup: PowerupEntity | null = null;
+    let pipesSinceLastPowerup = 0;
+    let nextPowerupThreshold = 3 + Math.floor(Math.random() * 3); // 3..5 pipes
+    let hasShield = false;
+    let shieldGraceFrames = 0;
+    let activeEffect: 'slowmo' | 'double' | null = null;
+    let effectFrames = 0;
+
+    // Initials entry state.
+    let initialsBuffer = '';
+
+    // Background parallax offsets (advance every drawn frame regardless of state).
+    const parallaxOffsets = [0, 0, 0];
+    const parallaxSpeeds = [0.2, 0.5, 0.9];
+
+    // ---- Leaderboard (top 5, persisted in localStorage) ----
+    let leaderboard: LeaderboardEntry[] = [];
     try {
-      bestScore = Number(localStorage.getItem('flappy-best-score') || '0') || 0;
+      const raw = localStorage.getItem('flappy-leaderboard');
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(parsed)) {
+        leaderboard = parsed
+          .filter(
+            (e): e is LeaderboardEntry =>
+              e && typeof e.initials === 'string' && typeof e.score === 'number'
+          )
+          .slice(0, 5);
+      }
     } catch {
-      bestScore = 0;
+      leaderboard = [];
+    }
+    // Migrate the old single best-score key into the leaderboard, once.
+    if (leaderboard.length === 0) {
+      try {
+        const oldBest = Number(localStorage.getItem('flappy-best-score') || '0') || 0;
+        if (oldBest > 0) leaderboard = [{ initials: 'YOU', score: oldBest }];
+      } catch {
+        /* ignore */
+      }
+    }
+
+    function saveLeaderboard() {
+      try {
+        localStorage.setItem('flappy-leaderboard', JSON.stringify(leaderboard));
+      } catch {
+        /* ignore storage errors */
+      }
+    }
+
+    function bestScore(): number {
+      return leaderboard.length > 0 ? leaderboard[0].score : 0;
+    }
+
+    function qualifiesForLeaderboard(s: number): boolean {
+      if (s <= 0) return false;
+      if (leaderboard.length < 5) return true;
+      return s > leaderboard[leaderboard.length - 1].score;
+    }
+
+    function commitInitials() {
+      const initials = (initialsBuffer || 'AAA').padEnd(3, 'A').slice(0, 3);
+      leaderboard.push({ initials, score });
+      leaderboard.sort((a, b) => b.score - a.score);
+      leaderboard = leaderboard.slice(0, 5);
+      saveLeaderboard();
+      state = 'gameover';
+    }
+
+    // ---- Difficulty ramp ----
+    function levelFor(s: number) {
+      return Math.floor(s / 5);
+    }
+    function speedForScore(s: number) {
+      return Math.min(BASE_SPEED + levelFor(s) * 0.15, MAX_SPEED);
+    }
+    function gapForScore(s: number) {
+      return Math.max(BASE_GAP - levelFor(s) * 4, MIN_GAP);
+    }
+    function currentSpeed() {
+      const base = speedForScore(score);
+      return activeEffect === 'slowmo' ? base * 0.5 : base;
     }
 
     function resetGame() {
@@ -110,6 +212,14 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       pipes = [];
       frame = 0;
       score = 0;
+      powerup = null;
+      pipesSinceLastPowerup = 0;
+      nextPowerupThreshold = 3 + Math.floor(Math.random() * 3);
+      hasShield = false;
+      shieldGraceFrames = 0;
+      activeEffect = null;
+      effectFrames = 0;
+      initialsBuffer = '';
     }
 
     function flap() {
@@ -122,12 +232,63 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       } else if (state === 'gameover') {
         state = 'start';
       }
+      // 'enterInitials' ignores flap input; handled via keyboard/tap-to-confirm.
+    }
+
+    function spawnPowerup(pipe: Pipe) {
+      const types: PowerupType[] = ['shield', 'slowmo', 'double'];
+      const type = types[Math.floor(Math.random() * types.length)];
+      powerup = {
+        x: pipe.x + PIPE_WIDTH + 70,
+        y: pipe.gapY + pipe.gap / 2,
+        type,
+      };
     }
 
     function spawnPipe() {
       const margin = 60;
-      const gapY = margin + Math.random() * (H - margin * 2 - PIPE_GAP);
-      pipes.push({ x: W + PIPE_WIDTH, gapY, passed: false });
+      const gap = gapForScore(score);
+      const gapY = margin + Math.random() * (H - margin * 2 - gap);
+
+      pipesSinceLastPowerup++;
+      const willSpawnPowerup = pipesSinceLastPowerup >= nextPowerupThreshold && !powerup;
+
+      // Force the gifted pipe static so the power-up's fixed collect point
+      // always lines up with the gap it was placed in.
+      const oscillateChance = Math.min(0.2 + levelFor(score) * 0.03, 0.45);
+      const type: Pipe['type'] =
+        !willSpawnPowerup && Math.random() < oscillateChance ? 'oscillate' : 'static';
+
+      const pipe: Pipe = {
+        x: W + PIPE_WIDTH,
+        gapY,
+        baseGapY: gapY,
+        gap,
+        passed: false,
+        type,
+        oscAmp: type === 'oscillate' ? 25 + Math.random() * 20 : 0,
+        oscSpeed: type === 'oscillate' ? 0.015 + Math.random() * 0.015 : 0,
+        oscPhase: Math.random() * Math.PI * 2,
+      };
+      pipes.push(pipe);
+
+      if (willSpawnPowerup) {
+        spawnPowerup(pipe);
+        pipesSinceLastPowerup = 0;
+        nextPowerupThreshold = 3 + Math.floor(Math.random() * 3);
+      }
+    }
+
+    function collectPowerup(type: PowerupType) {
+      if (type === 'shield') {
+        hasShield = true;
+      } else if (type === 'slowmo') {
+        activeEffect = 'slowmo';
+        effectFrames = SLOWMO_FRAMES;
+      } else if (type === 'double') {
+        activeEffect = 'double';
+        effectFrames = DOUBLE_FRAMES;
+      }
     }
 
     function update() {
@@ -139,47 +300,174 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
       if (frame % PIPE_INTERVAL === 0) spawnPipe();
 
+      const speed = currentSpeed();
       for (const pipe of pipes) {
-        pipe.x -= PIPE_SPEED;
+        pipe.x -= speed;
+        if (pipe.type === 'oscillate') {
+          const raw = pipe.baseGapY + Math.sin(frame * pipe.oscSpeed + pipe.oscPhase) * pipe.oscAmp;
+          pipe.gapY = Math.max(10, Math.min(H - 10 - pipe.gap, raw));
+        }
       }
       pipes = pipes.filter((p) => p.x > -PIPE_WIDTH);
+
+      if (powerup) {
+        powerup.x -= speed;
+        if (powerup.x < -POWERUP_RADIUS * 2) powerup = null;
+      }
 
       // Scoring: bird passes pipe's right edge.
       for (const pipe of pipes) {
         if (!pipe.passed && pipe.x + PIPE_WIDTH < BIRD_X) {
           pipe.passed = true;
-          score++;
+          score += activeEffect === 'double' ? 2 : 1;
         }
       }
 
-      // Collisions: ground / ceiling.
-      if (birdY + BIRD_RADIUS >= H - GROUND_HEIGHT || birdY - BIRD_RADIUS <= 0) {
-        endGame();
-        return;
+      // Power-up collection.
+      if (powerup) {
+        const dx = BIRD_X - powerup.x;
+        const dy = birdY - powerup.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < BIRD_RADIUS + POWERUP_RADIUS) {
+          collectPowerup(powerup.type);
+          powerup = null;
+        }
       }
 
+      // Effect timers.
+      if (activeEffect) {
+        effectFrames--;
+        if (effectFrames <= 0) {
+          activeEffect = null;
+          effectFrames = 0;
+        }
+      }
+      if (shieldGraceFrames > 0) {
+        shieldGraceFrames--;
+        return; // brief invulnerability window; skip collision checks
+      }
+
+      // Collisions: ground / ceiling.
+      let collided = birdY + BIRD_RADIUS >= H - GROUND_HEIGHT || birdY - BIRD_RADIUS <= 0;
+
       // Collisions: pipes.
-      for (const pipe of pipes) {
-        const withinX = BIRD_X + BIRD_RADIUS > pipe.x && BIRD_X - BIRD_RADIUS < pipe.x + PIPE_WIDTH;
-        if (withinX) {
-          const withinGap = birdY - BIRD_RADIUS > pipe.gapY && birdY + BIRD_RADIUS < pipe.gapY + PIPE_GAP;
-          if (!withinGap) {
-            endGame();
-            return;
+      if (!collided) {
+        for (const pipe of pipes) {
+          const withinX = BIRD_X + BIRD_RADIUS > pipe.x && BIRD_X - BIRD_RADIUS < pipe.x + PIPE_WIDTH;
+          if (withinX) {
+            const withinGap = birdY - BIRD_RADIUS > pipe.gapY && birdY + BIRD_RADIUS < pipe.gapY + pipe.gap;
+            if (!withinGap) {
+              collided = true;
+              break;
+            }
           }
+        }
+      }
+
+      if (collided) {
+        if (hasShield) {
+          hasShield = false;
+          shieldGraceFrames = SHIELD_GRACE_FRAMES;
+          birdVel = Math.min(birdVel, FLAP_VELOCITY * 0.6); // nudge back toward the gap
+        } else {
+          endGame();
         }
       }
     }
 
     function endGame() {
       state = 'gameover';
-      if (score > bestScore) {
-        bestScore = score;
-        try {
-          localStorage.setItem('flappy-best-score', String(bestScore));
-        } catch {
-          /* ignore storage errors */
-        }
+      activeEffect = null;
+      effectFrames = 0;
+      hasShield = false;
+      shieldGraceFrames = 0;
+      powerup = null;
+
+      if (qualifiesForLeaderboard(score)) {
+        state = 'enterInitials';
+        initialsBuffer = '';
+      }
+    }
+
+    function drawParallax() {
+      for (let i = 0; i < parallaxOffsets.length; i++) {
+        parallaxOffsets[i] = (parallaxOffsets[i] + parallaxSpeeds[i]) % 100000;
+      }
+
+      // Layer 1: distant stars (slowest).
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = colors.textMuted;
+      const spacing1 = 60;
+      for (let i = -1; i < W / spacing1 + 2; i++) {
+        const x = (((i * spacing1 - parallaxOffsets[0]) % (W + spacing1)) + (W + spacing1)) % (W + spacing1);
+        const y = 30 + ((i * 53) % 130);
+        ctx.beginPath();
+        ctx.arc(x, y, 1.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // Layer 2: horizon hills (medium).
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = colors.border;
+      const spacing2 = 140;
+      for (let i = -1; i < W / spacing2 + 2; i++) {
+        const x = (((i * spacing2 - parallaxOffsets[1]) % (W + spacing2)) + (W + spacing2)) % (W + spacing2);
+        const y = H * 0.68;
+        ctx.beginPath();
+        ctx.ellipse(x, y, 70, 22, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // Layer 3: near drifting dots (fastest, closest to the action).
+      ctx.save();
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = colors.accent;
+      const spacing3 = 90;
+      for (let i = -1; i < W / spacing3 + 2; i++) {
+        const x = (((i * spacing3 - parallaxOffsets[2]) % (W + spacing3)) + (W + spacing3)) % (W + spacing3);
+        const y = 90 + ((i * 77) % 260);
+        ctx.beginPath();
+        ctx.arc(x, y, 3.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawPowerup() {
+      if (!powerup) return;
+      const { x, y, type } = powerup;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(x, y, POWERUP_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = type === 'shield' ? '#4da3ff' : type === 'slowmo' ? '#c58cff' : '#ffd24d';
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = colors.text;
+      ctx.stroke();
+      ctx.fillStyle = '#12141a';
+      ctx.font = 'bold 11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(type === 'shield' ? 'S' : type === 'slowmo' ? 'Z' : '2x', x, y + 1);
+      ctx.restore();
+    }
+
+    function drawLeaderboard(cx: number, topY: number) {
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 13px sans-serif';
+      ctx.fillStyle = colors.textMuted;
+      ctx.fillText('TOP SCORES', cx, topY);
+      ctx.font = '13px sans-serif';
+      if (leaderboard.length === 0) {
+        ctx.fillText('No scores yet', cx, topY + 18);
+      } else {
+        leaderboard.slice(0, 5).forEach((entry, i) => {
+          ctx.fillText(`${i + 1}. ${entry.initials}  ${entry.score}`, cx, topY + 18 + i * 16);
+        });
       }
     }
 
@@ -188,12 +476,16 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       ctx.fillStyle = colors.bg;
       ctx.fillRect(0, 0, W, H);
 
+      drawParallax();
+
       // Pipes.
-      ctx.fillStyle = colors.accent;
       for (const pipe of pipes) {
+        ctx.fillStyle = pipe.type === 'oscillate' ? colors.accentStrong : colors.accent;
         ctx.fillRect(pipe.x, 0, PIPE_WIDTH, pipe.gapY);
-        ctx.fillRect(pipe.x, pipe.gapY + PIPE_GAP, PIPE_WIDTH, H - (pipe.gapY + PIPE_GAP));
+        ctx.fillRect(pipe.x, pipe.gapY + pipe.gap, PIPE_WIDTH, H - (pipe.gapY + pipe.gap));
       }
+
+      drawPowerup();
 
       // Ground line.
       ctx.strokeStyle = colors.border;
@@ -204,39 +496,84 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       ctx.stroke();
 
       // Bird.
+      if (hasShield) {
+        ctx.save();
+        ctx.strokeStyle = '#4da3ff';
+        ctx.lineWidth = 3;
+        ctx.globalAlpha = 0.9;
+        ctx.beginPath();
+        ctx.arc(BIRD_X, birdY, BIRD_RADIUS + 5, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+      const blinking = shieldGraceFrames > 0 && Math.floor(shieldGraceFrames / 4) % 2 === 0;
+      ctx.save();
+      if (blinking) ctx.globalAlpha = 0.4;
       ctx.fillStyle = colors.accentStrong;
       ctx.beginPath();
       ctx.arc(BIRD_X, birdY, BIRD_RADIUS, 0, Math.PI * 2);
       ctx.fill();
+      ctx.restore();
 
       // UI overlays.
       ctx.textAlign = 'center';
       if (state === 'start') {
         ctx.fillStyle = colors.text;
         ctx.font = 'bold 22px sans-serif';
-        ctx.fillText('Flap', W / 2, H / 2 - 20);
+        ctx.fillText('Flap', W / 2, H / 2 - 90);
         ctx.font = '15px sans-serif';
         ctx.fillStyle = colors.textMuted;
-        ctx.fillText('Click or press Space to start', W / 2, H / 2 + 10);
-        if (bestScore > 0) {
-          ctx.fillText(`Best: ${bestScore}`, W / 2, H / 2 + 34);
-        }
+        ctx.fillText('Click or press Space to start', W / 2, H / 2 - 62);
+        drawLeaderboard(W / 2, H / 2 - 20);
       } else if (state === 'playing') {
         ctx.fillStyle = colors.text;
         ctx.font = 'bold 28px sans-serif';
         ctx.fillText(String(score), W / 2, 50);
+
+        ctx.font = 'bold 12px sans-serif';
+        let badgeY = 74;
+        if (hasShield) {
+          ctx.fillStyle = '#4da3ff';
+          ctx.fillText('SHIELD ACTIVE', W / 2, badgeY);
+          badgeY += 16;
+        }
+        if (activeEffect === 'slowmo') {
+          ctx.fillStyle = '#c58cff';
+          ctx.fillText(`SLOW-MO ${Math.ceil(effectFrames / 60)}s`, W / 2, badgeY);
+        } else if (activeEffect === 'double') {
+          ctx.fillStyle = '#ffd24d';
+          ctx.fillText(`DOUBLE POINTS ${Math.ceil(effectFrames / 60)}s`, W / 2, badgeY);
+        }
+      } else if (state === 'enterInitials') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = colors.text;
+        ctx.font = 'bold 20px sans-serif';
+        ctx.fillText('New High Score!', W / 2, H / 2 - 70);
+        ctx.font = '16px sans-serif';
+        ctx.fillText(`Score: ${score}`, W / 2, H / 2 - 40);
+        ctx.font = 'bold 32px monospace';
+        const display = (initialsBuffer + '___').slice(0, 3).split('').join(' ');
+        ctx.fillText(display, W / 2, H / 2 + 6);
+        ctx.font = '13px sans-serif';
+        ctx.fillStyle = colors.textMuted;
+        ctx.fillText('Type letters, Backspace to edit, Enter to confirm', W / 2, H / 2 + 38);
+        ctx.fillText('(tap the canvas to confirm on touch devices)', W / 2, H / 2 + 56);
       } else if (state === 'gameover') {
         ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
         ctx.fillRect(0, 0, W, H);
         ctx.fillStyle = colors.text;
         ctx.font = 'bold 24px sans-serif';
-        ctx.fillText('Game Over', W / 2, H / 2 - 40);
+        ctx.fillText('Game Over', W / 2, H / 2 - 96);
         ctx.font = '18px sans-serif';
-        ctx.fillText(`Score: ${score}`, W / 2, H / 2 - 8);
+        ctx.fillText(`Score: ${score}`, W / 2, H / 2 - 66);
         ctx.fillStyle = colors.textMuted;
         ctx.font = '15px sans-serif';
-        ctx.fillText(`Best: ${bestScore}`, W / 2, H / 2 + 18);
-        ctx.fillText('Click or press Space to restart', W / 2, H / 2 + 46);
+        ctx.fillText(`Best: ${bestScore()}`, W / 2, H / 2 - 42);
+        drawLeaderboard(W / 2, H / 2 - 8);
+        ctx.fillStyle = colors.textMuted;
+        ctx.font = '15px sans-serif';
+        ctx.fillText('Click or press Space to restart', W / 2, H / 2 + 96);
       }
     }
 
@@ -247,11 +584,38 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     }
 
     // Input handlers.
+    function handleInitialsKey(e: KeyboardEvent) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        commitInitials();
+        return;
+      }
+      if (e.key === 'Backspace') {
+        e.preventDefault();
+        initialsBuffer = initialsBuffer.slice(0, -1);
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const ch = e.key.toUpperCase();
+      if (/^[A-Z0-9]$/.test(ch) && initialsBuffer.length < 3) {
+        e.preventDefault();
+        initialsBuffer += ch;
+      }
+    }
+
     const onPointer = (e: Event) => {
       e.preventDefault();
+      if (state === 'enterInitials') {
+        commitInitials();
+        return;
+      }
       flap();
     };
     const onKey = (e: KeyboardEvent) => {
+      if (state === 'enterInitials') {
+        handleInitialsKey(e);
+        return;
+      }
       if (e.code === 'Space') {
         e.preventDefault();
         flap();
