@@ -1,0 +1,30 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { getCollection } from 'astro:content';
+
+const projects = (await getCollection('projects')).sort(
+  (a, b) => b.data.date.valueOf() - a.data.date.valueOf()
+);
+---
+
+<BaseLayout title="Projects — Karl Murray">
+  <h1>Projects</h1>
+  <ul class="project-grid">
+    {projects.map((project) => (
+      <li class="project-card">
+        <h3>{project.data.title}</h3>
+        <p>{project.data.description}</p>
+        {project.data.tags.length > 0 && (
+          <ul class="tag-list">
+            {project.data.tags.map((tag) => <li class="tag">{tag}</li>)}
+          </ul>
+        )}
+        <p>
+          {project.data.link && <a href={project.data.link}>Visit ↗</a>}
+          {project.data.link && project.data.repo && ' · '}
+          {project.data.repo && <a href={project.data.repo}>Source ↗</a>}
+        </p>
+      </li>
+    ))}
+  </ul>
+</BaseLayout>
