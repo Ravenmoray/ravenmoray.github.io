@@ -1,0 +1,325 @@
+---
+// Self-contained decorative particle-network background.
+// Fixed, full-viewport, behind all content, never intercepts clicks.
+// Theme-aware via document.documentElement[data-theme] and a
+// window "themechange" CustomEvent hook (dispatched elsewhere).
+---
+
+<canvas id="canvas-bg" aria-hidden="true"></canvas>
+
+<style>
+  #canvas-bg {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: -1;
+    pointer-events: none;
+    display: block;
+  }
+</style>
+
+<script>
+  // Guard against Astro View Transitions re-running this script and
+  // spawning duplicate rAF loops / listeners. We keep loop state keyed
+  // on the window object so a second execution can detect and stop the
+  // previous instance before starting a fresh one.
+  interface CanvasBgState {
+    rafId: number | null;
+    cleanup: (() => void) | null;
+  }
+
+  declare global {
+    interface Window {
+      __canvasBgState?: CanvasBgState;
+    }
+  }
+
+  function initCanvasBackground(): void {
+    const canvas = document.getElementById('canvas-bg') as HTMLCanvasElement | null;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Tear down any previous instance (e.g. from a prior astro:page-load).
+    const prev = window.__canvasBgState;
+    if (prev) {
+      if (prev.rafId !== null) cancelAnimationFrame(prev.rafId);
+      if (prev.cleanup) prev.cleanup();
+    }
+
+    const state: CanvasBgState = { rafId: null, cleanup: null };
+    window.__canvasBgState = state;
+
+    let width = 0;
+    let height = 0;
+    let dpr = Math.max(1, window.devicePixelRatio || 1);
+
+    const MAX_LINK_DIST = 140;
+    const MOUSE_RADIUS = 120;
+    const MOUSE_FORCE = 0.02;
+
+    let particles: Particle[] = [];
+
+    let mouseX: number | null = null;
+    let mouseY: number | null = null;
+    let mouseActive = false;
+
+    const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+    interface Particle {
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      r: number;
+    }
+
+    function particleCountForViewport(): number {
+      const area = width * height;
+      // Scale between ~60 and ~100 based on viewport area, favoring
+      // fewer particles on small/mobile viewports for performance.
+      const base = Math.round((area / (1920 * 1080)) * 100);
+      return Math.min(100, Math.max(60, base || 60)) - (width < 640 ? 20 : 0);
+    }
+
+    function clampParticleCount(): void {
+      const target = Math.max(20, particleCountForViewport());
+      if (particles.length > target) {
+        particles.length = target;
+      } else {
+        while (particles.length < target) {
+          particles.push(makeParticle());
+        }
+      }
+    }
+
+    function makeParticle(): Particle {
+      return {
+        x: Math.random() * width,
+        y: Math.random() * height,
+        vx: (Math.random() - 0.5) * 0.4,
+        vy: (Math.random() - 0.5) * 0.4,
+        r: Math.random() * 1.5 + 1,
+      };
+    }
+
+    function resize(): void {
+      width = window.innerWidth;
+      height = window.innerHeight;
+      dpr = Math.max(1, window.devicePixelRatio || 1);
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      canvas.style.width = width + 'px';
+      canvas.style.height = height + 'px';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      if (particles.length === 0) {
+        const count = particleCountForViewport();
+        particles = Array.from({ length: count }, makeParticle);
+      } else {
+        // Reposition/reclamp particles that now sit outside the viewport.
+        for (const p of particles) {
+          if (p.x > width) p.x = width;
+          if (p.y > height) p.y = height;
+        }
+        clampParticleCount();
+      }
+    }
+
+    // ---- Theme handling -----------------------------------------------
+    interface ColorSet {
+      particle: string;
+      lineBase: string; // rgba prefix, opacity appended per-pair
+      background: string | null; // null = don't paint a bg (transparent)
+    }
+
+    let colors: ColorSet = getColorsForTheme();
+
+    function getColorsForTheme(): ColorSet {
+      const theme = document.documentElement.getAttribute('data-theme');
+      if (theme === 'light') {
+        return {
+          particle: 'rgba(45, 74, 68, 0.55)',
+          lineBase: '45, 74, 68',
+          background: null,
+        };
+      }
+      // Default: dark theme (site background #0f1115, accent #7dd3c0).
+      return {
+        particle: 'rgba(125, 211, 192, 0.65)',
+        lineBase: '125, 211, 192',
+        background: null,
+      };
+    }
+
+    function handleThemeChange(): void {
+      colors = getColorsForTheme();
+      if (reducedMotionQuery.matches) {
+        drawFrame(); // repaint the static frame immediately with new colors
+      }
+    }
+
+    // ---- Mouse / touch interaction -------------------------------------
+    function handlePointerMove(e: PointerEvent): void {
+      if (e.pointerType === 'touch') return; // skip interaction on touch
+      mouseX = e.clientX;
+      mouseY = e.clientY;
+      mouseActive = true;
+    }
+
+    function handlePointerLeave(): void {
+      mouseActive = false;
+      mouseX = null;
+      mouseY = null;
+    }
+
+    // ---- Simulation + drawing -------------------------------------------
+    function step(): void {
+      for (const p of particles) {
+        p.x += p.vx;
+        p.y += p.vy;
+
+        // Bounce at edges.
+        if (p.x <= 0 || p.x >= width) {
+          p.vx *= -1;
+          p.x = Math.max(0, Math.min(width, p.x));
+        }
+        if (p.y <= 0 || p.y >= height) {
+          p.vy *= -1;
+          p.y = Math.max(0, Math.min(height, p.y));
+        }
+
+        // Gentle mouse interaction: subtle repel within radius.
+        if (mouseActive && mouseX !== null && mouseY !== null) {
+          const dx = p.x - mouseX;
+          const dy = p.y - mouseY;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist > 0 && dist < MOUSE_RADIUS) {
+            const force = (1 - dist / MOUSE_RADIUS) * MOUSE_FORCE;
+            p.vx += (dx / dist) * force;
+            p.vy += (dy / dist) * force;
+          }
+        }
+
+        // Gently cap velocity so interaction doesn't accumulate forever.
+        const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+        const maxSpeed = 0.8;
+        if (speed > maxSpeed) {
+          p.vx = (p.vx / speed) * maxSpeed;
+          p.vy = (p.vy / speed) * maxSpeed;
+        }
+      }
+    }
+
+    function drawFrame(): void {
+      ctx.clearRect(0, 0, width, height);
+
+      // Lines between nearby particles.
+      for (let i = 0; i < particles.length; i++) {
+        const a = particles[i];
+        for (let j = i + 1; j < particles.length; j++) {
+          const b = particles[j];
+          const dx = a.x - b.x;
+          const dy = a.y - b.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < MAX_LINK_DIST) {
+            const opacity = 1 - dist / MAX_LINK_DIST;
+            ctx.strokeStyle = `rgba(${colors.lineBase}, ${(opacity * 0.5).toFixed(3)})`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+          }
+        }
+      }
+
+      // Particles.
+      ctx.fillStyle = colors.particle;
+      for (const p of particles) {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function loop(): void {
+      step();
+      drawFrame();
+      state.rafId = requestAnimationFrame(loop);
+    }
+
+    function handleVisibilityChange(): void {
+      if (document.hidden) {
+        if (state.rafId !== null) {
+          cancelAnimationFrame(state.rafId);
+          state.rafId = null;
+        }
+      } else if (!reducedMotionQuery.matches && state.rafId === null) {
+        state.rafId = requestAnimationFrame(loop);
+      }
+    }
+
+    function handleResize(): void {
+      resize();
+      if (reducedMotionQuery.matches) {
+        drawFrame();
+      }
+    }
+
+    function handleReducedMotionChange(): void {
+      if (reducedMotionQuery.matches) {
+        if (state.rafId !== null) {
+          cancelAnimationFrame(state.rafId);
+          state.rafId = null;
+        }
+        drawFrame();
+      } else if (!document.hidden && state.rafId === null) {
+        state.rafId = requestAnimationFrame(loop);
+      }
+    }
+
+    // ---- Init -------------------------------------------------------------
+    resize();
+
+    window.addEventListener('resize', handleResize);
+    window.addEventListener('themechange', handleThemeChange as EventListener);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // Pointer events cover mouse; touch is explicitly ignored above.
+    // pointerleave keeps things tidy when the pointer exits the window.
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerleave', handlePointerLeave);
+    window.addEventListener('blur', handlePointerLeave);
+
+    if (typeof reducedMotionQuery.addEventListener === 'function') {
+      reducedMotionQuery.addEventListener('change', handleReducedMotionChange);
+    }
+
+    if (reducedMotionQuery.matches) {
+      drawFrame();
+    } else {
+      state.rafId = requestAnimationFrame(loop);
+    }
+
+    state.cleanup = () => {
+      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('themechange', handleThemeChange as EventListener);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerleave', handlePointerLeave);
+      window.removeEventListener('blur', handlePointerLeave);
+      if (typeof reducedMotionQuery.removeEventListener === 'function') {
+        reducedMotionQuery.removeEventListener('change', handleReducedMotionChange);
+      }
+    };
+  }
+
+  // Initial load.
+  initCanvasBackground();
+  // Astro View Transitions: re-init safely on each client-side navigation
+  // (the guard in initCanvasBackground tears down the previous loop first).
+  document.addEventListener('astro:page-load', initCanvasBackground);
+</script>
