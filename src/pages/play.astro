@@ -1,0 +1,284 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+
+<BaseLayout title="Play — Karl Murray" description="A small flappy-style arcade game.">
+  <h1>Play</h1>
+  <p class="intro-lead">Tap, click, or press Space to flap. Dodge the pipes, rack up a score.</p>
+
+  <div class="game-wrap">
+    <canvas id="game" width="400" height="500" aria-label="Flappy arcade game canvas" role="img"></canvas>
+  </div>
+
+  <p class="hint">Click / tap the canvas or press Space to flap. Same to start and restart.</p>
+</BaseLayout>
+
+<style>
+  .game-wrap {
+    display: flex;
+    justify-content: center;
+    margin: 2rem 0 1rem;
+  }
+
+  #game {
+    width: 100%;
+    max-width: 400px;
+    height: auto;
+    aspect-ratio: 4 / 5;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    display: block;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+
+  .hint {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+  }
+</style>
+
+<script>
+  // Self-contained flappy-style game. Re-initializes on astro:page-load so it
+  // works both on hard navigation and Astro's client-side view transitions.
+  // A previous run's rAF loop is cancelled before a new one starts to avoid
+  // leaked loops when navigating away and back.
+
+  let rafId: number | null = null;
+  let cleanupFns: Array<() => void> = [];
+
+  function initGame() {
+    // Cancel any previous loop / listeners from an earlier page-load.
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    cleanupFns.forEach((fn) => fn());
+    cleanupFns = [];
+
+    const canvas = document.getElementById('game') as HTMLCanvasElement | null;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const W = canvas.width;
+    const H = canvas.height;
+
+    const styles = getComputedStyle(document.documentElement);
+    const colors = {
+      bg: styles.getPropertyValue('--bg').trim() || '#0f1115',
+      accent: styles.getPropertyValue('--accent').trim() || '#7dd3c0',
+      accentStrong: styles.getPropertyValue('--accent-strong').trim() || '#a8e6d9',
+      text: styles.getPropertyValue('--text').trim() || '#e8e9ec',
+      textMuted: styles.getPropertyValue('--text-muted').trim() || '#9aa1ac',
+      border: styles.getPropertyValue('--border').trim() || '#262b34',
+    };
+
+    // Tuned constants.
+    const GRAVITY = 0.45;
+    const FLAP_VELOCITY = -8;
+    const PIPE_WIDTH = 56;
+    const PIPE_GAP = 150;
+    const PIPE_SPEED = 2.4;
+    const PIPE_INTERVAL = 105; // frames between new pipes
+    const BIRD_RADIUS = 12;
+    const BIRD_X = 90;
+    const GROUND_HEIGHT = 4; // just the bottom boundary line
+
+    type Pipe = { x: number; gapY: number; passed: boolean };
+
+    type State = 'start' | 'playing' | 'gameover';
+
+    let state: State = 'start';
+    let birdY = H / 2;
+    let birdVel = 0;
+    let pipes: Pipe[] = [];
+    let frame = 0;
+    let score = 0;
+    let bestScore = 0;
+    try {
+      bestScore = Number(localStorage.getItem('flappy-best-score') || '0') || 0;
+    } catch {
+      bestScore = 0;
+    }
+
+    function resetGame() {
+      birdY = H / 2;
+      birdVel = 0;
+      pipes = [];
+      frame = 0;
+      score = 0;
+    }
+
+    function flap() {
+      if (state === 'start') {
+        state = 'playing';
+        resetGame();
+        birdVel = FLAP_VELOCITY;
+      } else if (state === 'playing') {
+        birdVel = FLAP_VELOCITY;
+      } else if (state === 'gameover') {
+        state = 'start';
+      }
+    }
+
+    function spawnPipe() {
+      const margin = 60;
+      const gapY = margin + Math.random() * (H - margin * 2 - PIPE_GAP);
+      pipes.push({ x: W + PIPE_WIDTH, gapY, passed: false });
+    }
+
+    function update() {
+      if (state !== 'playing') return;
+
+      frame++;
+      birdVel += GRAVITY;
+      birdY += birdVel;
+
+      if (frame % PIPE_INTERVAL === 0) spawnPipe();
+
+      for (const pipe of pipes) {
+        pipe.x -= PIPE_SPEED;
+      }
+      pipes = pipes.filter((p) => p.x > -PIPE_WIDTH);
+
+      // Scoring: bird passes pipe's right edge.
+      for (const pipe of pipes) {
+        if (!pipe.passed && pipe.x + PIPE_WIDTH < BIRD_X) {
+          pipe.passed = true;
+          score++;
+        }
+      }
+
+      // Collisions: ground / ceiling.
+      if (birdY + BIRD_RADIUS >= H - GROUND_HEIGHT || birdY - BIRD_RADIUS <= 0) {
+        endGame();
+        return;
+      }
+
+      // Collisions: pipes.
+      for (const pipe of pipes) {
+        const withinX = BIRD_X + BIRD_RADIUS > pipe.x && BIRD_X - BIRD_RADIUS < pipe.x + PIPE_WIDTH;
+        if (withinX) {
+          const withinGap = birdY - BIRD_RADIUS > pipe.gapY && birdY + BIRD_RADIUS < pipe.gapY + PIPE_GAP;
+          if (!withinGap) {
+            endGame();
+            return;
+          }
+        }
+      }
+    }
+
+    function endGame() {
+      state = 'gameover';
+      if (score > bestScore) {
+        bestScore = score;
+        try {
+          localStorage.setItem('flappy-best-score', String(bestScore));
+        } catch {
+          /* ignore storage errors */
+        }
+      }
+    }
+
+    function draw() {
+      // Background.
+      ctx.fillStyle = colors.bg;
+      ctx.fillRect(0, 0, W, H);
+
+      // Pipes.
+      ctx.fillStyle = colors.accent;
+      for (const pipe of pipes) {
+        ctx.fillRect(pipe.x, 0, PIPE_WIDTH, pipe.gapY);
+        ctx.fillRect(pipe.x, pipe.gapY + PIPE_GAP, PIPE_WIDTH, H - (pipe.gapY + PIPE_GAP));
+      }
+
+      // Ground line.
+      ctx.strokeStyle = colors.border;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, H - GROUND_HEIGHT);
+      ctx.lineTo(W, H - GROUND_HEIGHT);
+      ctx.stroke();
+
+      // Bird.
+      ctx.fillStyle = colors.accentStrong;
+      ctx.beginPath();
+      ctx.arc(BIRD_X, birdY, BIRD_RADIUS, 0, Math.PI * 2);
+      ctx.fill();
+
+      // UI overlays.
+      ctx.textAlign = 'center';
+      if (state === 'start') {
+        ctx.fillStyle = colors.text;
+        ctx.font = 'bold 22px sans-serif';
+        ctx.fillText('Flap', W / 2, H / 2 - 20);
+        ctx.font = '15px sans-serif';
+        ctx.fillStyle = colors.textMuted;
+        ctx.fillText('Click or press Space to start', W / 2, H / 2 + 10);
+        if (bestScore > 0) {
+          ctx.fillText(`Best: ${bestScore}`, W / 2, H / 2 + 34);
+        }
+      } else if (state === 'playing') {
+        ctx.fillStyle = colors.text;
+        ctx.font = 'bold 28px sans-serif';
+        ctx.fillText(String(score), W / 2, 50);
+      } else if (state === 'gameover') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = colors.text;
+        ctx.font = 'bold 24px sans-serif';
+        ctx.fillText('Game Over', W / 2, H / 2 - 40);
+        ctx.font = '18px sans-serif';
+        ctx.fillText(`Score: ${score}`, W / 2, H / 2 - 8);
+        ctx.fillStyle = colors.textMuted;
+        ctx.font = '15px sans-serif';
+        ctx.fillText(`Best: ${bestScore}`, W / 2, H / 2 + 18);
+        ctx.fillText('Click or press Space to restart', W / 2, H / 2 + 46);
+      }
+    }
+
+    function loop() {
+      update();
+      draw();
+      rafId = requestAnimationFrame(loop);
+    }
+
+    // Input handlers.
+    const onPointer = (e: Event) => {
+      e.preventDefault();
+      flap();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        flap();
+      }
+    };
+
+    canvas.addEventListener('pointerdown', onPointer);
+    window.addEventListener('keydown', onKey);
+
+    cleanupFns.push(() => {
+      canvas.removeEventListener('pointerdown', onPointer);
+      window.removeEventListener('keydown', onKey);
+    });
+
+    draw();
+    rafId = requestAnimationFrame(loop);
+  }
+
+  document.addEventListener('astro:page-load', initGame);
+
+  // Ensure any running loop is stopped when navigating away via view transitions.
+  document.addEventListener('astro:before-swap', () => {
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    cleanupFns.forEach((fn) => fn());
+    cleanupFns = [];
+  });
+</script>
