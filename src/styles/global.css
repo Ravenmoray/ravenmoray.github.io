@@ -19,6 +19,20 @@ html {
   color-scheme: dark;
 }
 
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-elevated: #f4f5f7;
+  --text: #1a1d23;
+  --text-muted: #5b6270;
+  --accent: #0f8a76;
+  --accent-strong: #0b6b5b;
+  --border: #dfe2e7;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
 body {
   margin: 0;
   background: var(--bg);
