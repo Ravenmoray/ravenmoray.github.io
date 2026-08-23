@@ -1,0 +1,150 @@
+---
+/**
+ * ThemeToggle.astro
+ * ------------------
+ * A small light/dark theme toggle button.
+ *
+ * INTEGRATION NOTES FOR WHOEVER WIRES THIS INTO BaseLayout.astro:
+ *
+ * 1. This component renders TWO things:
+ *      a) An inline, synchronous, render-blocking <script> that MUST run
+ *         in <head> — BEFORE any content paints — to avoid a flash of the
+ *         wrong theme. It reads localStorage.getItem('theme') and sets
+ *         document.documentElement.dataset.theme accordingly, defaulting
+ *         to 'dark' (the site's default) when nothing is stored.
+ *      b) A <button class="theme-toggle"> element plus its own
+ *         (non-blocking, `is:inline`) <script> that handles clicks,
+ *         persistence, icon/label sync, and re-syncing across Astro
+ *         View Transitions (`astro:page-load`).
+ *
+ * 2. Because the head script must run before first paint, and this
+ *    component is likely dropped into the document body (e.g. the site
+ *    header), you should place <ThemeToggle /> wherever the button should
+ *    appear in the markup — the head script inside this component is a
+ *    plain <script> (not `is:inline` scoped to the body position); Astro
+ *    hoists/handles module scripts by default, but to GUARANTEE it runs
+ *    before paint regardless of where <ThemeToggle /> is placed in the
+ *    body, you may prefer to copy the blocking snippet (marked below,
+ *    between BLOCKING SCRIPT START/END) directly into <head> yourself and
+ *    drop it before other stylesheets/scripts. As shipped, the script
+ *    below uses `is:inline` with no async/defer, so if you place
+ *    <ThemeToggle /> directly in <head> it will execute synchronously in
+ *    place, which is the safest option. If you place the whole component
+ *    in the body instead, move just that first <script> block into
+ *    <head> manually.
+ *
+ * 3. Dispatches `window.dispatchEvent(new CustomEvent('themechange', {
+ *    detail: { theme } }))` on every toggle, for other components (e.g. a
+ *    canvas background) to listen for.
+ *
+ * Exactly what this file renders:
+ *   - <script is:inline> ... </script>   (blocking theme-init, → head)
+ *   - <button class="theme-toggle" id="theme-toggle" aria-label="...">...</button>
+ *   - <style> ... </style>               (scoped button styles)
+ *   - <script is:inline> ... </script>   (click handler + view-transition resync)
+ */
+---
+
+{/* BLOCKING SCRIPT START — must run in <head>, before first paint */}
+<script is:inline>
+  (function () {
+    try {
+      var stored = localStorage.getItem('theme');
+      var theme = stored === 'light' || stored === 'dark' ? stored : 'dark';
+      document.documentElement.dataset.theme = theme;
+    } catch (e) {
+      document.documentElement.dataset.theme = 'dark';
+    }
+  })();
+</script>
+{/* BLOCKING SCRIPT END */}
+
+<button
+  type="button"
+  class="theme-toggle"
+  id="theme-toggle"
+  aria-label="Switch to light theme"
+>
+  <span class="theme-toggle-icon" aria-hidden="true">&#9789;</span>
+</button>
+
+<style>
+  .theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-muted);
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .theme-toggle:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+
+  .theme-toggle-icon {
+    display: inline-block;
+    transform: translateY(-1px);
+  }
+</style>
+
+<script is:inline>
+  (function () {
+    var ICONS = { dark: '☽', light: '☀︎' };
+    var LABELS = {
+      dark: 'Switch to light theme',
+      light: 'Switch to dark theme',
+    };
+
+    function currentTheme() {
+      return document.documentElement.dataset.theme === 'light'
+        ? 'light'
+        : 'dark';
+    }
+
+    function syncButton(btn) {
+      if (!btn) return;
+      var theme = currentTheme();
+      var icon = btn.querySelector('.theme-toggle-icon');
+      if (icon) icon.textContent = ICONS[theme];
+      btn.setAttribute('aria-label', LABELS[theme]);
+    }
+
+    function toggleTheme() {
+      var next = currentTheme() === 'light' ? 'dark' : 'light';
+      document.documentElement.dataset.theme = next;
+      try {
+        localStorage.setItem('theme', next);
+      } catch (e) {
+        /* ignore storage errors (private mode, etc.) */
+      }
+      syncButton(document.getElementById('theme-toggle'));
+      window.dispatchEvent(
+        new CustomEvent('themechange', { detail: { theme: next } })
+      );
+    }
+
+    function init() {
+      var btn = document.getElementById('theme-toggle');
+      if (!btn || btn.dataset.themeToggleBound === 'true') {
+        syncButton(btn);
+        return;
+      }
+      btn.dataset.themeToggleBound = 'true';
+      btn.addEventListener('click', toggleTheme);
+      syncButton(btn);
+    }
+
+    init();
+    document.addEventListener('astro:page-load', init);
+  })();
+</script>
