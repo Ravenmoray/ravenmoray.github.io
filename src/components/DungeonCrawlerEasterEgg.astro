@@ -1,0 +1,386 @@
+---
+// A tiny, easy-to-miss dungeon-crawler easter egg.
+// Click the trigger to reveal a small grid-based room you can walk around in.
+---
+
+<div class="dce-root" data-dce-root>
+  <button type="button" class="dce-trigger" data-dce-trigger aria-expanded="false" aria-controls="dce-game">
+    ▸ psst...
+  </button>
+
+  <div class="dce-game" id="dce-game" data-dce-game hidden>
+    <div class="dce-header">
+      <p class="dce-hint">Use arrow keys / WASD to move. Find <span class="dce-legend-t">$</span> for treasure, watch out for <span class="dce-legend-m">M</span>.</p>
+      <button type="button" class="dce-close" data-dce-close aria-label="Close game">✕</button>
+    </div>
+    <div class="dce-grid" data-dce-grid role="img" aria-label="Dungeon room"></div>
+    <p class="dce-message" data-dce-message aria-live="polite">You slip into a forgotten room...</p>
+    <div class="dce-choices" data-dce-choices hidden>
+      <button type="button" class="dce-btn" data-dce-fight>Fight</button>
+      <button type="button" class="dce-btn" data-dce-flee>Flee</button>
+    </div>
+  </div>
+</div>
+
+<style>
+  .dce-root {
+    margin-top: 2rem;
+    font-family: var(--font-mono);
+  }
+
+  .dce-trigger {
+    background: none;
+    border: none;
+    padding: 0.15rem 0.3rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    opacity: 0.55;
+    cursor: pointer;
+    letter-spacing: 0.02em;
+    transition: opacity 0.15s ease, color 0.15s ease;
+  }
+
+  .dce-trigger:hover,
+  .dce-trigger:focus-visible {
+    opacity: 1;
+    color: var(--accent);
+  }
+
+  .dce-game {
+    margin-top: 0.75rem;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    border-radius: 8px;
+    padding: 0.9rem;
+    max-width: 22rem;
+  }
+
+  .dce-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.6rem;
+  }
+
+  .dce-hint {
+    margin: 0;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+  }
+
+  .dce-legend-t {
+    color: var(--accent-strong);
+  }
+
+  .dce-legend-m {
+    color: #e08a8a;
+  }
+
+  .dce-close {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 4px;
+    width: 1.4rem;
+    height: 1.4rem;
+    line-height: 1;
+    cursor: pointer;
+    flex: none;
+  }
+
+  .dce-close:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .dce-grid {
+    display: grid;
+    grid-template-columns: repeat(8, 1.75rem);
+    grid-template-rows: repeat(8, 1.75rem);
+    gap: 2px;
+    outline: none;
+  }
+
+  .dce-tile {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    font-size: 0.9rem;
+    color: var(--text-muted);
+    border-radius: 2px;
+  }
+
+  .dce-tile.dce-wall {
+    background: var(--border);
+  }
+
+  .dce-tile.dce-player {
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  .dce-tile.dce-monster {
+    color: #e08a8a;
+  }
+
+  .dce-tile.dce-treasure {
+    color: var(--accent-strong);
+  }
+
+  .dce-message {
+    margin: 0.6rem 0 0;
+    font-size: 0.78rem;
+    color: var(--text);
+    min-height: 1.2em;
+  }
+
+  .dce-choices {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  .dce-btn {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.25rem 0.6rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .dce-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+</style>
+
+<script>
+  const SIZE = 8;
+
+  // Hardcoded room layout. W = wall, . = floor, M = monster, $ = treasure, P = player start.
+  const LAYOUT = [
+    'W W W W W W W W',
+    'W . . . . . . W',
+    'W . W W . W . W',
+    'W . W . . W . W',
+    'W . . . W . . W',
+    'W W . W W . W W',
+    'W . . . M . $ W',
+    'W W W W W W W W',
+  ].map((row) => row.split(' '));
+
+  const START = { x: 1, y: 1 };
+
+  function initDungeonCrawler(root) {
+    const trigger = root.querySelector('[data-dce-trigger]');
+    const game = root.querySelector('[data-dce-game]');
+    const closeBtn = root.querySelector('[data-dce-close]');
+    const gridEl = root.querySelector('[data-dce-grid]');
+    const messageEl = root.querySelector('[data-dce-message]');
+    const choicesEl = root.querySelector('[data-dce-choices]');
+    const fightBtn = root.querySelector('[data-dce-fight]');
+    const fleeBtn = root.querySelector('[data-dce-flee]');
+
+    if (!trigger || !game || !closeBtn || !gridEl || !messageEl || !choicesEl || !fightBtn || !fleeBtn) {
+      return () => {};
+    }
+
+    /** @type {{x:number,y:number}} */
+    let player = { ...START };
+    /** @type {Set<string>} */
+    let cleared = new Set();
+    let encounterActive = false;
+    let keydownHandler = null;
+
+    function tileAt(x, y) {
+      return LAYOUT[y]?.[x];
+    }
+
+    function key(x, y) {
+      return `${x},${y}`;
+    }
+
+    function render() {
+      gridEl.innerHTML = '';
+      for (let y = 0; y < SIZE; y++) {
+        for (let x = 0; x < SIZE; x++) {
+          const cell = document.createElement('div');
+          cell.className = 'dce-tile';
+          const raw = tileAt(x, y);
+          const isPlayer = player.x === x && player.y === y;
+          const wasCleared = cleared.has(key(x, y));
+
+          if (isPlayer) {
+            cell.classList.add('dce-player');
+            cell.textContent = '@';
+          } else if (raw === 'W') {
+            cell.classList.add('dce-wall');
+          } else if (raw === 'M' && !wasCleared) {
+            cell.classList.add('dce-monster');
+            cell.textContent = 'M';
+          } else if (raw === '$' && !wasCleared) {
+            cell.classList.add('dce-treasure');
+            cell.textContent = '$';
+          } else {
+            cell.textContent = '';
+          }
+          gridEl.appendChild(cell);
+        }
+      }
+    }
+
+    function setMessage(text) {
+      messageEl.textContent = text;
+    }
+
+    function startEncounter(type) {
+      encounterActive = true;
+      choicesEl.hidden = type !== 'monster';
+      if (type === 'monster') {
+        setMessage('A grumpy dungeon rat blocks your path. Fight or flee?');
+      } else if (type === 'treasure') {
+        cleared.add(key(player.x, player.y));
+        const loot = ['a shiny bottle cap', 'three suspicious mushrooms', 'a tiny rubber duck', 'a slightly bent spoon'][
+          Math.floor(Math.random() * 4)
+        ];
+        setMessage(`You found ${loot}! Riches beyond measure (sort of).`);
+        encounterActive = false;
+        render();
+      }
+    }
+
+    function resolveFight() {
+      const win = Math.random() > 0.5;
+      cleared.add(key(player.x, player.y));
+      encounterActive = false;
+      choicesEl.hidden = true;
+      setMessage(
+        win
+          ? 'You bonk the rat on the head. Victory! It scurries off.'
+          : 'The rat nibbles your ankle and steals your snack. You retreat, dignity intact-ish.'
+      );
+      render();
+    }
+
+    function resolveFlee() {
+      encounterActive = false;
+      choicesEl.hidden = true;
+      setMessage('You back away slowly. The rat does not care.');
+      render();
+    }
+
+    function tryMove(dx, dy) {
+      if (encounterActive) return;
+      const nx = player.x + dx;
+      const ny = player.y + dy;
+      if (nx < 0 || ny < 0 || nx >= SIZE || ny >= SIZE) return;
+      if (tileAt(nx, ny) === 'W') return;
+
+      player = { x: nx, y: ny };
+      render();
+
+      const tile = tileAt(nx, ny);
+      const already = cleared.has(key(nx, ny));
+      if (tile === 'M' && !already) {
+        startEncounter('monster');
+      } else if (tile === '$' && !already) {
+        startEncounter('treasure');
+      } else {
+        setMessage('You tiptoe through the dust.');
+      }
+    }
+
+    function onKeydown(e) {
+      const map = {
+        ArrowUp: [0, -1],
+        ArrowDown: [0, 1],
+        ArrowLeft: [-1, 0],
+        ArrowRight: [1, 0],
+        w: [0, -1],
+        s: [0, 1],
+        a: [-1, 0],
+        d: [1, 0],
+        W: [0, -1],
+        S: [0, 1],
+        A: [-1, 0],
+        D: [1, 0],
+      };
+      const move = map[e.key];
+      if (!move) return;
+      e.preventDefault();
+      tryMove(move[0], move[1]);
+    }
+
+    function openGame() {
+      player = { ...START };
+      cleared = new Set();
+      encounterActive = false;
+      choicesEl.hidden = true;
+      game.hidden = false;
+      trigger.setAttribute('aria-expanded', 'true');
+      setMessage('You slip into a forgotten room...');
+      render();
+
+      keydownHandler = onKeydown;
+      window.addEventListener('keydown', keydownHandler);
+      gridEl.setAttribute('tabindex', '-1');
+      gridEl.focus();
+    }
+
+    function closeGame() {
+      game.hidden = true;
+      trigger.setAttribute('aria-expanded', 'false');
+      if (keydownHandler) {
+        window.removeEventListener('keydown', keydownHandler);
+        keydownHandler = null;
+      }
+    }
+
+    function onTriggerClick() {
+      if (game.hidden) {
+        openGame();
+      } else {
+        closeGame();
+      }
+    }
+
+    trigger.addEventListener('click', onTriggerClick);
+    closeBtn.addEventListener('click', closeGame);
+    fightBtn.addEventListener('click', resolveFight);
+    fleeBtn.addEventListener('click', resolveFlee);
+
+    // Return a cleanup function for view-transition navigations.
+    return () => {
+      closeGame();
+      trigger.removeEventListener('click', onTriggerClick);
+      closeBtn.removeEventListener('click', closeGame);
+      fightBtn.removeEventListener('click', resolveFight);
+      fleeBtn.removeEventListener('click', resolveFlee);
+    };
+  }
+
+  let cleanupFns = [];
+
+  function setup() {
+    document.querySelectorAll('[data-dce-root]').forEach((root) => {
+      const cleanup = initDungeonCrawler(root);
+      cleanupFns.push(cleanup);
+    });
+  }
+
+  function teardown() {
+    cleanupFns.forEach((fn) => fn());
+    cleanupFns = [];
+  }
+
+  document.addEventListener('astro:page-load', setup);
+  document.addEventListener('astro:before-swap', teardown);
+</script>
